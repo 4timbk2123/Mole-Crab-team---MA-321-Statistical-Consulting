@@ -463,6 +463,144 @@ boxplot(size_data$count,
 
 ```
 
+```{r}
+# -----------------------------------------
+# FINAL MAP
+# -----------------------------------------
+
+site_summary <- size_data %>%
+  group_by(location) %>%
+  summarise(
+    n_samples = n(),
+    mean_abundance = mean(count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------------
+# Manual coastal coordinates (aligned vertically)
+# ----------------------------------
+
+site_coords <- data.frame(
+  location = c("sandy_hook","bluffs","south_bath","deal","ocean_grove"),
+  lat = c(40.445, 40.300, 40.292, 40.245, 40.210),
+  lon = c(-73.990, -74.000, -74.003, -74.025, -74.010)
+)
+
+site_summary <- left_join(site_summary, site_coords, by = "location")
+
+# Clean labels
+site_summary$location_clean <- dplyr::recode(site_summary$location,
+  sandy_hook  = "Sandy Hook",
+  bluffs      = "Bluffs",
+  south_bath  = "South Bath",
+  deal        = "Deal",
+  ocean_grove = "Ocean Grove"
+)
+
+# ----------------------------------
+# Label positioning (original spacing)
+# ----------------------------------
+
+site_summary <- site_summary %>%
+  mutate(
+    label_lon = lon - 0.025,
+    label_lat = case_when(
+      location == "sandy_hook" ~ lat + 0.01,
+      location == "bluffs" ~ lat + 0.010,
+      location == "south_bath" ~ lat - 0.010,
+      location == "deal" ~ lat - 0.005,
+      location == "ocean_grove" ~ lat - 0.008,
+      TRUE ~ lat
+    )
+  )
+
+# ----------------------------------
+# NJ Map
+# ----------------------------------
+
+nj_map <- map_data("state") %>%
+  filter(region == "new jersey")
+
+# ----------------------------------
+# Nourishment Reach (original position)
+# ----------------------------------
+
+nourishment_line <- data.frame(
+  lon = c(-73.992, -73.998, -74.008, -74.020),
+  lat = c(40.360, 40.305, 40.230, 40.150)
+)
+
+# ----------------------------------
+# Plot
+# ----------------------------------
+
+ggplot() +
+  
+  geom_polygon(data = nj_map,
+               aes(x = long, y = lat, group = group),
+               fill = "grey90",
+               color = "grey50",
+               linewidth = 0.4) +
+  
+  geom_path(data = nourishment_line,
+            aes(x = lon, y = lat),
+            color = "red",
+            linewidth = 2.8,
+            alpha = 0.9) +
+  
+  annotate("text",
+           x = -73.975,
+           y = 40.26,
+           label = "2023–2024 Beach\nNourishment Event",
+           color = "red",
+           size = 5,
+           fontface = "bold",
+           hjust = 0) +
+  
+  geom_point(data = site_summary,
+             aes(x = lon, y = lat,
+                 fill = mean_abundance),
+             shape = 21,
+             size = 8,
+             color = "black",
+             stroke = 1.3) +
+  
+  geom_text(data = site_summary,
+            aes(x = label_lon,
+                y = label_lat,
+                label = paste0(location_clean,
+                               "\n(n = ", n_samples, ")")),
+            hjust = 1,
+            size = 4,
+            fontface = "bold",
+            lineheight = 0.9) +
+  
+  scale_fill_gradient(
+    low = "#c6dbef",
+    high = "#08306b",
+    name = "Mean Abundance\n(crabs per scoop)"
+  ) +
+  
+  coord_quickmap(
+    xlim = c(-74.15, -73.82),
+    ylim = c(40.15, 40.50)
+  ) +
+  
+  theme_classic(base_size = 18) +
+  
+  theme(
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 20)
+  ) +
+  
+  labs(
+    title = "Sampling Sites 2020-2025",
+    subtitle = "Monmouth County, New Jersey",
+    x = "Longitude",
+    y = "Latitude"
+  )
+```
 
 ```{r}
 # ----------------------------------
@@ -1367,141 +1505,404 @@ ggplot(model_before_after,
 ```
 
 ```{r}
-# --------------------------------------------
-# FINAL MAP
-# --------------------------------------------
+# =========================================
+# SIZE × TEMPERATURE × YEAR ANALYSIS
+# =========================================
 
-site_summary <- size_data %>%
-  group_by(location) %>%
-  summarise(
-    n_samples = n(),
-    mean_abundance = mean(count, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# ----------------------------------
-# Manual coastal coordinates (aligned vertically)
-# ----------------------------------
-
-site_coords <- data.frame(
-  location = c("sandy_hook","bluffs","south_bath","deal","ocean_grove"),
-  lat = c(40.445, 40.300, 40.292, 40.245, 40.210),
-  lon = c(-73.990, -74.000, -74.003, -74.025, -74.010)
+# --- 2-Way Interaction Model ---
+nb_size_interact <- glm.nb(
+  count ~ water_temp_c * size_class +
+          size_class * year +
+          location +
+          offset(log(scoops)),
+  data = analysis_data,
+  control = glm.control(maxit = 200)
 )
 
-site_summary <- left_join(site_summary, site_coords, by = "location")
-
-# Clean labels
-site_summary$location_clean <- dplyr::recode(site_summary$location,
-  sandy_hook  = "Sandy Hook",
-  bluffs      = "Bluffs",
-  south_bath  = "South Bath",
-  deal        = "Deal",
-  ocean_grove = "Ocean Grove"
+# --- Full 3-Way Interaction Model ---
+nb_3way <- glm.nb(
+  count ~ water_temp_c * size_class * year +
+          location +
+          offset(log(scoops)),
+  data = analysis_data,
+  control = glm.control(maxit = 300)
 )
 
-# ----------------------------------
-# Label positioning (original spacing)
-# ----------------------------------
+# --- Model Comparison ---
+cat("\n--- Model Comparison ---\n")
+print(AIC(nb_size_interact, nb_3way))
+print(anova(nb_size_interact, nb_3way, test = "LRT"))
 
-site_summary <- site_summary %>%
+# --- Extract Year-Specific Temperature Slopes ---
+coef_table <- summary(nb_3way)$coefficients
+
+irr_3way <- as.data.frame(coef_table) %>%
   mutate(
-    label_lon = lon - 0.025,
-    label_lat = case_when(
-      location == "sandy_hook" ~ lat + 0.01,
-      location == "bluffs" ~ lat + 0.010,
-      location == "south_bath" ~ lat - 0.010,
-      location == "deal" ~ lat - 0.005,
-      location == "ocean_grove" ~ lat - 0.008,
-      TRUE ~ lat
+    term = rownames(coef_table),
+    IRR  = exp(Estimate),
+    CI_low  = exp(Estimate - 1.96 * `Std. Error`),
+    CI_high = exp(Estimate + 1.96 * `Std. Error`)
+  ) %>%
+  dplyr::select(term, IRR, CI_low, CI_high, `Pr(>|z|)`) %>%
+  rename(p_value = `Pr(>|z|)`)
+
+cat("\n--- 3-Way Interaction IRR Table ---\n")
+print(irr_3way)
+```
+
+```{r}
+# =========================================
+# COMPUTE YEAR-SPECIFIC TEMPERATURE EFFECTS
+# =========================================
+
+years <- levels(analysis_data$year)
+sizes <- levels(analysis_data$size_class)
+
+coefs <- coef(nb_3way)
+vc <- vcov(nb_3way)
+
+results_list <- list()
+
+for (y in years) {
+  for (s in sizes) {
+    
+    # Build contrast vector
+    cvec <- rep(0, length(coefs))
+    names(cvec) <- names(coefs)
+    
+    # Always include main temp
+    cvec["water_temp_c"] <- 1
+    
+    # Size interaction
+    size_term <- paste0("water_temp_c:size_class", s)
+    if (size_term %in% names(coefs))
+      cvec[size_term] <- 1
+    
+    # Year interaction
+    year_term <- paste0("water_temp_c:year", y)
+    if (year_term %in% names(coefs))
+      cvec[year_term] <- 1
+    
+    # 3-way interaction
+    three_way <- paste0("water_temp_c:size_class", s, ":year", y)
+    if (three_way %in% names(coefs))
+      cvec[three_way] <- 1
+    
+    # Compute slope
+    log_beta <- sum(cvec * coefs)
+    
+    # Correct matrix multiplication
+    se_log <- sqrt(as.numeric(t(cvec) %*% vc %*% cvec))
+    
+    IRR <- exp(log_beta)
+    lower_IRR <- exp(log_beta - 1.96 * se_log)
+    upper_IRR <- exp(log_beta + 1.96 * se_log)
+    
+    results_list[[paste(y, s)]] <- data.frame(
+      year = y,
+      size_class = s,
+      percent_decline = (1 - IRR) * 100,
+      lower = (1 - upper_IRR) * 100,
+      upper = (1 - lower_IRR) * 100
     )
-  )
+  }
+}
 
-# ----------------------------------
-# NJ Map
-# ----------------------------------
+results <- do.call(rbind, results_list)
 
-nj_map <- map_data("state") %>%
-  filter(region == "new jersey")
+results$year <- factor(results$year,
+                       levels = years)
 
-# ----------------------------------
-# Nourishment Reach (original position)
-# ----------------------------------
+results$size_class <- factor(results$size_class,
+                             levels = sizes)
+```
 
-nourishment_line <- data.frame(
-  lon = c(-73.992, -73.998, -74.008, -74.020),
-  lat = c(40.360, 40.305, 40.230, 40.150)
-)
+```{r}
+# =========================================
+# YEARLY TEMPERATURE SENSITIVITY PLOT
+# =========================================
 
-# ----------------------------------
-# Plot
-# ----------------------------------
+results$year <- factor(results$year,
+                       levels = c("2021","2022","2023","2024","2025"))
 
-ggplot() +
+ggplot(results,
+       aes(x = as.numeric(year),
+           y = -percent_decline,
+           group = size_class,
+           color = size_class,
+           fill = size_class)) +
   
-  geom_polygon(data = nj_map,
-               aes(x = long, y = lat, group = group),
-               fill = "grey90",
-               color = "grey50",
-               linewidth = 0.4) +
+  # Confidence ribbons
+  geom_ribbon(aes(ymin = -upper,
+                  ymax = -lower),
+              alpha = 0.18,
+              color = NA) +
   
-  geom_path(data = nourishment_line,
-            aes(x = lon, y = lat),
-            color = "red",
-            linewidth = 2.8,
-            alpha = 0.9) +
+  # Lines and points
+  geom_line(linewidth = 1.4) +
+  geom_point(size = 3) +
+  
+  # Disturbance year
+  geom_vline(xintercept = 4,
+             linetype = "dashed",
+             linewidth = 1,
+             color = "red") +
   
   annotate("text",
-           x = -73.975,
-           y = 40.26,
-           label = "2023–2024 Beach\nNourishment Event",
+           x = 3.2,
+           y = -105,
+           label = "Beach Nourishment Disturbance",
            color = "red",
-           size = 5,
            fontface = "bold",
-           hjust = 0) +
+           size = 4.5,
+           vjust = 1.2) +
   
-  geom_point(data = site_summary,
-             aes(x = lon, y = lat,
-                 fill = mean_abundance),
-             shape = 21,
-             size = 8,
-             color = "black",
-             stroke = 1.3) +
+  # Global colors
+  scale_color_manual(values = crab_colors) +
+  scale_fill_manual(values = crab_colors) +
   
-  geom_text(data = site_summary,
-            aes(x = label_lon,
-                y = label_lat,
-                label = paste0(location_clean,
-                               "\n(n = ", n_samples, ")")),
-            hjust = 1,
-            size = 4,
-            fontface = "bold",
-            lineheight = 0.9) +
-  
-  scale_fill_gradient(
-    low = "#c6dbef",
-    high = "#08306b",
-    name = "Mean Abundance\n(crabs per scoop)"
+  scale_x_continuous(
+    breaks = 1:5,
+    labels = levels(results$year)
   ) +
   
-  coord_quickmap(
-    xlim = c(-74.15, -73.82),
-    ylim = c(40.15, 40.50)
-  ) +
+  geom_hline(yintercept = 0,
+             linetype = "dashed",
+             linewidth = 0.8) +
+  
+  coord_cartesian(ylim = c(-110, 150)) +
   
   theme_classic(base_size = 18) +
   
-  theme(
-    legend.position = "right",
-    axis.title = element_text(face = "bold"),
-    plot.title = element_text(face = "bold", size = 20)
-  ) +
+  labs(
+    x = "Year",
+    y = "Percent Change in Abundance per 1°C Increase (95% CI)",
+    color = "Size Class",
+    fill  = "Size Class",
+    title = "Yearly Variation in Temperature Sensitivity by Size Class"
+  )
+```
+
+```{r}
+# =========================================
+# ZONE REDISTRIBUTION BY SIZE CLASS
+# =========================================
+
+zone_model <- glm.nb(
+  count ~ zone * size_class * nourishment_period +
+          location +
+          offset(log(scoops)),
+  data = analysis_data
+)
+
+summary(zone_model)
+
+# ----------------------------------
+# WEIGHTED MEAN SIZE BY ZONE
+# ----------------------------------
+
+zone_mean_size <- size_data %>%
+  filter(!is.na(zone),
+         !location %in% c("ocean_grove", "sandy_hook")) %>%
+  mutate(size_numeric = case_when(
+    size_class == "Small (2mm)" ~ 2,
+    size_class == "Medium (6mm)" ~ 6,
+    size_class == "Large (12mm+)" ~ 12
+  )) %>%
+  group_by(zone, nourishment_period) %>%
+  summarise(
+    weighted_mean = sum(count * size_numeric) / sum(count),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = nourishment_period,
+              values_from = weighted_mean) %>%
+  mutate(
+    label = paste0(
+      "Mean size: ",
+      round(Before, 1), " → ",
+      round(After, 1), " mm"
+    )
+  )
+
+zone_mean_size$zone <- factor(zone_mean_size$zone,
+                              levels = c("bore","swash"),
+                              labels = c("Bore Zone","Swash Zone"))
+```
+
+```{r}
+# =========================================
+# ZONE-BASED SIZE STRUCTURE SHIFT
+# =========================================
+
+# -------------------------------
+# Proportion data
+# -------------------------------
+
+zone_prop <- size_data %>%
+  filter(!is.na(zone),
+         !location %in% c("ocean_grove", "sandy_hook")) %>%
+  group_by(zone, nourishment_period, size_class) %>%
+  summarise(total = sum(count, na.rm = TRUE),
+            .groups = "drop") %>%
+  group_by(zone, nourishment_period) %>%
+  mutate(prop = total / sum(total)) %>%
+  ungroup()
+
+# -------------------------------
+# Total N per zone
+# -------------------------------
+
+zone_totals <- size_data %>%
+  filter(!is.na(zone),
+         !location %in% c("ocean_grove", "sandy_hook")) %>%
+  group_by(zone, nourishment_period) %>%
+  summarise(total_n = sum(count, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(label = paste0("n = ", total_n))
+
+# -------------------------------
+# Clean zone labels
+# -------------------------------
+
+zone_prop$zone <- factor(zone_prop$zone,
+                         levels = c("bore","swash"),
+                         labels = c("Bore Zone","Swash Zone"))
+
+zone_totals$zone <- factor(zone_totals$zone,
+                           levels = c("bore","swash"),
+                           labels = c("Bore Zone","Swash Zone"))
+
+# -------------------------------
+# Plot
+# -------------------------------
+
+ggplot(zone_prop,
+       aes(x = nourishment_period,
+           y = prop,
+           fill = size_class)) +
+  
+  geom_col(position = "fill") +
+  
+  facet_wrap(~ zone, nrow = 1) +
+  geom_text(
+    data = zone_mean_size,
+    aes(x = 1.5,          # center between Before & After
+        y = 1.13,
+        label = label),
+    inherit.aes = FALSE,
+    size = 5,
+    fontface = "bold"
+  )+
+  
+  geom_text(data = zone_totals,
+            aes(x = nourishment_period,
+                y = 1.05,
+                label = label),
+            inherit.aes = FALSE,
+            size = 5,
+            fontface = "bold") +
+  
+  scale_fill_manual(values = crab_colors) +
+  
+  coord_cartesian(ylim = c(0, 1.1)) +
+  
+  theme_classic(base_size = 16) +
   
   labs(
-    title = "Sampling Sites 2020-2025",
-    subtitle = "Monmouth County, New Jersey",
-    x = "Longitude",
-    y = "Latitude"
+    x = "Nourishment Period",
+    y = "Proportion of Total Abundance Within Zone",
+    fill = "Size Class",
+    title = "Size Structure Shift Within Bore and Swash Zones"
   )
+```
+
+```{r}
+# =========================================
+# DEMOGRAPHIC TRUNCATION SUMMARY
+# =========================================
+
+# -------------------------------
+# Large : Small Ratio
+# -------------------------------
+
+size_ratio <- size_data %>%
+  filter(!location %in% c("ocean_grove","sandy_hook")) %>%
+  group_by(nourishment_period) %>%
+  summarise(
+    large = sum(count[size_class == "Large (12mm+)"], na.rm = TRUE),
+    small = sum(count[size_class == "Small (2mm)"], na.rm = TRUE),
+    ratio = large / small,
+    .groups = "drop"
+  )
+
+ratio_decline <- 1 - 
+  (size_ratio$ratio[size_ratio$nourishment_period=="After"] /
+   size_ratio$ratio[size_ratio$nourishment_period=="Before"])
+
+# -------------------------------
+# Binomial Model (Unadjusted)
+# -------------------------------
+
+analysis_large <- analysis_data %>%
+  mutate(is_large = ifelse(size_class == "Large (12mm+)", 1, 0))
+
+glm_large <- glm(
+  is_large ~ nourishment_period,
+  family = binomial,
+  weights = count,
+  data = analysis_large
+)
+
+log_or <- coef(glm_large)["nourishment_periodAfter"]
+se_log_or <- summary(glm_large)$coefficients[
+  "nourishment_periodAfter","Std. Error"]
+
+or_unadj  <- exp(log_or)
+ci_low    <- exp(log_or - 1.96*se_log_or)
+ci_high   <- exp(log_or + 1.96*se_log_or)
+
+# Predicted probabilities
+prob_df <- data.frame(
+  nourishment_period = c("Before","After")
+)
+
+prob_df$prob <- predict(glm_large,
+                        newdata = prob_df,
+                        type="response")
+
+prob_decline <- 1 - 
+  (prob_df$prob[2] / prob_df$prob[1])
+
+# -------------------------------
+# Adjusted Model (Location)
+# -------------------------------
+
+glm_large_adj <- glm(
+  is_large ~ nourishment_period + location,
+  family = binomial,
+  weights = count,
+  data = analysis_large
+)
+
+log_or_adj <- coef(glm_large_adj)["nourishment_periodAfter"]
+or_adj <- exp(log_or_adj)
+
+# -------------------------------
+# Summary Output
+# -------------------------------
+
+cat("Large:Small ratio decline:",
+    round(ratio_decline*100,1), "%\n")
+
+cat("Unadjusted OR:",
+    round(or_unadj,3),
+    "95% CI:", round(ci_low,3), "-",
+    round(ci_high,3), "\n")
+
+cat("Probability decline:",
+    round(prob_decline*100,1), "%\n")
+
+cat("Adjusted OR (location controlled):",
+    round(or_adj,3), "\n")
 ```
 
