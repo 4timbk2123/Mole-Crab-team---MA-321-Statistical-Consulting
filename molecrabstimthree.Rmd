@@ -1,0 +1,2346 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+---
+```{r}
+rm(list = ls())
+
+library(readxl)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(maps)
+library(MASS)
+library(car)
+```
+
+```{r}
+data_raw <- read_excel("mole crabs fixed swash and temp.xlsx") %>%
+  clean_names() %>%
+  mutate(
+    water_temp = as.numeric(str_extract(water_temp, "[0-9.]+")),
+    date = as.Date(date),
+    year = factor(year(date))
+  )
+```
+
+```{r}
+clean_data <- data_raw %>%
+  mutate(
+
+    # ===========================
+    # STANDARDIZE LOCATION
+    # ===========================
+    location = case_when(
+      str_detect(tolower(location), "brighton|bluff") ~ "bluffs",
+      str_detect(tolower(location), "south bath|bath ave") ~ "south_bath",
+      str_detect(tolower(location), "deal|allenhurst|roosevelt") ~ "deal",
+      str_detect(tolower(location), "ocean grove") ~ "ocean_grove",
+      str_detect(tolower(location), "sandy hook") ~ "sandy_hook",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN WAVES
+    # ===========================
+    waves_clean = case_when(
+      str_detect(tolower(waves_sm_med_large), "small|\\bsm\\b") ~ "Small",
+      str_detect(tolower(waves_sm_med_large), "med") ~ "Medium",
+      str_detect(tolower(waves_sm_med_large), "large|rough|3-5") ~ "Large",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN ZONE
+    # ===========================
+    zone = tolower(zone),
+    zone = case_when(
+      str_detect(zone, "bore")  ~ "bore",
+      str_detect(zone, "swash|surf") ~ "swash",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN ENVIRONMENTAL NUMERIC VARIABLES
+    # ===========================
+    salinity = as.numeric(str_extract(salinity, "[0-9.]+")),
+    do_mg_l_raw = as.numeric(str_extract(do_mg_l, "[0-9.]+")),
+    air_temp_deg_c = as.numeric(str_extract(air_temp_deg_c, "[0-9.]+")),
+
+    # ===========================
+    # FIX DO
+    # ===========================
+    do_mg_l = case_when(
+      do_mg_l_raw > 20 ~ NA_real_,
+      do_mg_l_raw <= 0 ~ NA_real_,
+      TRUE ~ do_mg_l_raw
+    ),
+
+    # ===========================
+    # CLEAN MOON PHASE
+    # ===========================
+    moon_phase_clean = tolower(moon_phase),
+    moon_phase_clean = case_when(
+      str_detect(moon_phase_clean, "full") ~ "Full",
+      str_detect(moon_phase_clean, "first|waxing") ~ "Waxing",
+      str_detect(moon_phase_clean, "last|waning") ~ "Waning",
+      str_detect(moon_phase_clean, "quarter|quater") ~ "Quarter",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN TIDE STAGE
+    # ===========================
+    tide_clean = tolower(tide_stage),
+    tide_clean = case_when(
+      str_detect(tide_clean, "high") ~ "High",
+      str_detect(tide_clean, "low|\\bl\\b") ~ "Low",
+      str_detect(tide_clean, "rising|flood|incoming") ~ "Rising",
+      str_detect(tide_clean, "falling|ebb") ~ "Falling",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN SKY
+    # ===========================
+    sky_clean = tolower(sky),
+    sky_clean = case_when(
+      str_detect(sky_clean, "clear|sun") ~ "Clear",
+      str_detect(sky_clean, "part") ~ "Partly Cloudy",
+      str_detect(sky_clean, "cloud") ~ "Cloudy",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN FOAM
+    # ===========================
+    foam_clean = tolower(foam_floatables_y_n),
+    foam_clean = case_when(
+      str_detect(foam_clean, "y|foam") ~ "Foam",
+      str_detect(foam_clean, "n|none|little") ~ "No Foam",
+      TRUE ~ NA_character_
+    ),
+
+    # ===========================
+    # CLEAN WATER CLARITY
+    # ===========================
+    water_clean = tolower(water_color_transparency),
+    water_clean = case_when(
+      str_detect(water_clean, "clear|transparent|high transparency") ~ "Clear",
+      str_detect(water_clean, "murky|low transparency|dark|brown|grey|cloudy") ~ "Murky",
+      str_detect(water_clean, "green|olive|yellow|blue") ~ "Moderate",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+
+  # Remove helper column
+  dplyr::select(-do_mg_l_raw) %>%
+
+  # Keep valid locations only
+  filter(!is.na(location)) %>%
+
+  mutate(
+    location = factor(location),
+    year = factor(year, levels = sort(unique(year))),
+    waves_clean = factor(waves_clean, levels = c("Small","Medium","Large")),
+    zone = factor(zone, levels = c("bore","swash")),
+    moon_phase_clean = factor(moon_phase_clean,
+                              levels = c("Waxing","Full","Waning","Quarter")),
+    tide_clean = factor(tide_clean,
+                        levels = c("Low","Rising","High","Falling")),
+    sky_clean = factor(sky_clean,
+                       levels = c("Clear","Partly Cloudy","Cloudy")),
+    foam_clean = factor(foam_clean,
+                        levels = c("No Foam","Foam")),
+    water_clean = factor(water_clean,
+                         levels = c("Clear","Moderate","Murky"))
+  ) %>%
+
+  droplevels()
+```
+
+```{r}
+# ----------------------------------
+# MISSING DATA CHECK
+# ----------------------------------
+
+cat("Missing values by variable:\n")
+print(colSums(is.na(clean_data)))
+
+cat("\nTotal rows before cleaning:", nrow(data_raw), "\n")
+cat("Rows after location filtering:", nrow(clean_data), "\n")
+
+# ----------------------------------
+# DUPLICATE CHECK
+# ----------------------------------
+
+cat("Number of duplicate rows:",
+    sum(duplicated(clean_data)), "\n")
+
+# ==========================================
+# YEAR STRUCTURE DIAGNOSTICS
+# ==========================================
+
+cat("\n=============================\n")
+cat("YEAR STRUCTURE TABLES\n")
+cat("=============================\n\n")
+
+# -----------------------------
+# Basic Counts
+# -----------------------------
+
+cat("Samples per Year:\n")
+print(table(clean_data$year))
+
+cat("\nLocation × Year:\n")
+print(table(clean_data$location, clean_data$year))
+
+cat("\nZone × Year:\n")
+print(table(clean_data$zone, clean_data$year))
+
+cat("\nWaves × Year:\n")
+print(table(clean_data$waves_clean, clean_data$year))
+
+cat("\nGroin × Year:\n")
+print(table(clean_data$groin, clean_data$year))
+
+cat("\nMoon Phase × Year:\n")
+print(table(clean_data$moon_phase_clean, clean_data$year))
+
+cat("\nTide Stage × Year:\n")
+print(table(clean_data$tide_clean, clean_data$year))
+
+cat("\nSky × Year:\n")
+print(table(clean_data$sky_clean, clean_data$year))
+
+cat("\nFoam × Year:\n")
+print(table(clean_data$foam_clean, clean_data$year))
+
+cat("\nWater Clarity × Year:\n")
+print(table(clean_data$water_clean, clean_data$year))
+
+
+# -----------------------------
+# Continuous Variable Summaries by Year
+# -----------------------------
+
+cat("\nWater Temperature by Year:\n")
+print(tapply(clean_data$water_temp,
+             clean_data$year,
+             summary))
+
+cat("\nSalinity by Year:\n")
+print(tapply(clean_data$salinity,
+             clean_data$year,
+             summary))
+
+cat("\nDissolved Oxygen by Year:\n")
+print(tapply(clean_data$do_mg_l,
+             clean_data$year,
+             summary))
+
+cat("\nAir Temperature by Year:\n")
+print(tapply(clean_data$air_temp_deg_c,
+             clean_data$year,
+             summary))
+
+cat("\nSampling Effort (Scoops) by Year:\n")
+print(tapply(clean_data$scoops,
+             clean_data$year,
+             summary))
+
+# -----------------------------
+# Zero Proportion by Year (Raw Counts)
+# -----------------------------
+
+cat("\nZero Proportion by Year (Raw Totals):\n")
+zero_raw <- clean_data %>%
+  mutate(total_count = ct_2mm + ct_6mm + ct_12mm) %>%
+  group_by(year) %>%
+  summarise(
+    zero_prop = mean(total_count == 0, na.rm = TRUE),
+    mean_total = mean(total_count, na.rm = TRUE),
+    n = n()
+  )
+
+print(zero_raw)
+
+cat("\n=============================\n")
+cat("END YEAR STRUCTURE TABLES\n")
+cat("=============================\n")
+```
+
+```{r}
+# ==========================================
+# DESCRIPTIVE STATISTICS
+# ==========================================
+
+# ----------------------------------
+# Overall Summary
+# ----------------------------------
+
+cat("Total samples:", nrow(clean_data), "\n")
+cat("Unique dates:", length(unique(clean_data$date)), "\n")
+
+summary(clean_data$water_temp)
+summary(clean_data$salinity)
+summary(clean_data$do_mg_l)
+summary(clean_data$air_temp_deg_c)
+
+# ----------------------------------
+# Sampling Effort
+# ----------------------------------
+
+summary(clean_data$scoops)
+
+table(clean_data$year)
+table(clean_data$location)
+table(clean_data$zone)
+table(clean_data$waves_clean)
+
+# ----------------------------------
+# Contingency Tables (Structure Check)
+# ----------------------------------
+
+# Location by Year
+table(clean_data$location, clean_data$year)
+
+# Zone by Year
+table(clean_data$zone, clean_data$year)
+
+# Location by Zone
+table(clean_data$location, clean_data$zone)
+
+# Waves by Year
+table(clean_data$waves_clean, clean_data$year)
+
+# ----------------------------------
+# Continuous Variable Correlations
+# ----------------------------------
+
+cor_matrix <- cor(
+  clean_data %>%
+    dplyr::select(water_temp,
+                  salinity,
+                  do_mg_l,
+                  air_temp_deg_c),
+  use = "complete.obs"
+)
+cor_matrix
+```
+
+```{r}
+# ----------------------------------
+# CREATE LONG FORMAT SIZE DATA
+# ----------------------------------
+
+temp_mean <- mean(clean_data$water_temp, na.rm = TRUE)
+
+size_data <- clean_data %>%
+  dplyr::select(
+    date,
+    water_temp,
+    salinity,
+    do_mg_l,
+    air_temp_deg_c,
+    waves_clean,
+    location,
+    year,
+    zone,
+    groin,            
+    scoops,
+    ct_2mm, ct_6mm, ct_12mm
+  ) %>%
+  
+  mutate(
+    ct_2mm  = as.numeric(ct_2mm),
+    ct_6mm  = as.numeric(ct_6mm),
+    ct_12mm = as.numeric(ct_12mm),
+    
+    # Clean  
+    groin = case_when(
+      groin %in% c("N","n") ~ "North",
+      groin %in% c("S","s") ~ "South",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  
+  pivot_longer(
+    cols = c(ct_2mm, ct_6mm, ct_12mm),
+    names_to = "size_class",
+    values_to = "count"
+  ) %>%
+  
+  mutate(
+    size_class = factor(
+      size_class,
+      levels = c("ct_2mm","ct_6mm","ct_12mm"),
+      labels = c("Small (2mm)",
+                 "Medium (6mm)",
+                 "Large (12mm+)")
+    ),
+    
+    water_temp_c = water_temp - temp_mean,
+    
+    count = ifelse(is.na(count), 0, count),
+    
+    zone = factor(zone, levels = c("bore","swash")),
+    groin = factor(groin, levels = c("North","South"))
+  ) %>%
+  
+  droplevels()
+```
+
+```{r}
+# ==========================================
+# DESCRIPTIVE STATS – LONG FORMAT
+# ==========================================
+
+# Total crab abundance summary
+summary(size_data$count)
+
+# Abundance by size class
+size_data %>%
+  group_by(size_class) %>%
+  summarise(
+    mean_count = mean(count),
+    median_count = median(count),
+    sd_count = sd(count),
+    zeros = sum(count == 0),
+    n = n()
+  )
+
+# Abundance by year
+size_data %>%
+  group_by(year) %>%
+  summarise(
+    mean_count = mean(count),
+    sd_count = sd(count),
+    n = n()
+  )
+
+# Abundance by zone
+size_data %>%
+  group_by(zone) %>%
+  summarise(
+    mean_count = mean(count),
+    sd_count = sd(count),
+    n = n()
+  )
+
+# Zone × Year structure (important for interaction stability)
+table(size_data$zone, size_data$year)
+```
+
+```{r}
+# ==========================================
+# MORE DESCRIPTIVE STATISTICS
+# ==========================================
+
+size_data <- size_data %>%
+  mutate(
+    disturbance_phase = case_when(
+      year %in% c("2021","2022") ~ "Baseline",
+      year == "2023" ~ "Transitional",
+      year == "2024" ~ "Collapse",
+      year == "2025" ~ "Recovery",
+      TRUE ~ NA_character_
+    ),
+    disturbance_phase = factor(
+      disturbance_phase,
+      levels = c("Baseline","Transitional","Collapse","Recovery")
+    )
+  )
+# ----------------------------------
+# Zero Proportion by Year
+# ----------------------------------
+
+zero_year <- size_data %>%
+  group_by(year) %>%
+  summarise(
+    zero_prop = mean(count == 0, na.rm = TRUE),
+    mean_count = mean(count, na.rm = TRUE),
+    n = n()
+  )
+
+print(zero_year)
+
+# ----------------------------------
+# Before vs After Summary
+# ----------------------------------
+
+before_after <- size_data %>%
+  group_by(disturbance_phase) %>%
+  summarise(
+    mean_count = mean(count, na.rm = TRUE),
+    median_count = median(count, na.rm = TRUE),
+    zero_prop = mean(count == 0, na.rm = TRUE),
+    sd_count = sd(count, na.rm = TRUE),
+    n = n()
+  )
+
+print(before_after)
+
+# ----------------------------------
+# Coefficient of Variation by Size Class
+# ----------------------------------
+
+cv_table <- size_data %>%
+  group_by(size_class) %>%
+  summarise(
+    mean = mean(count, na.rm = TRUE),
+    sd = sd(count, na.rm = TRUE),
+    CV = sd / mean
+  )
+
+print(cv_table)
+
+# ----------------------------------
+# Quartiles by Year
+# ----------------------------------
+
+quartiles_year <- size_data %>%
+  group_by(year) %>%
+  summarise(
+    q25 = quantile(count, 0.25, na.rm = TRUE),
+    median = median(count, na.rm = TRUE),
+    q75 = quantile(count, 0.75, na.rm = TRUE)
+  )
+
+print(quartiles_year)
+
+# ----------------------------------
+# Observed 2024 Decline
+# ----------------------------------
+
+decline_table <- clean_data %>%
+  mutate(total = ct_2mm + ct_6mm + ct_12mm) %>%
+  filter(year %in% c("2021","2022","2024")) %>%
+  group_by(year) %>%
+  summarise(mean_total = mean(total, na.rm = TRUE)) %>%
+  pivot_wider(names_from = year,
+              values_from = mean_total)
+
+baseline_mean <- mean(c(decline_table$`2021`,
+                        decline_table$`2022`))
+
+decline <- 1 - (decline_table$`2024` / baseline_mean)
+
+cat("Observed 2024 decline:",
+    round(decline * 100, 1), "%\n")
+# ----------------------------------
+# Spatial Heterogeneity
+# ----------------------------------
+
+spatial_summary <- size_data %>%
+  group_by(location) %>%
+  summarise(
+    mean_count = mean(count, na.rm = TRUE),
+    zero_prop = mean(count == 0, na.rm = TRUE),
+    n = n()
+  )
+
+print(spatial_summary)
+
+# ----------------------------------
+# Dispersion Metrics (NB Justification)
+# ----------------------------------
+
+mean_count <- mean(size_data$count, na.rm = TRUE)
+var_count  <- var(size_data$count, na.rm = TRUE)
+
+cat("Overall mean:", mean_count, "\n")
+cat("Overall variance:", var_count, "\n")
+cat("Variance-to-Mean ratio:",
+    var_count / mean_count, "\n")
+```
+
+```{r}
+# ----------------------------------
+# GLOBAL COLOR + FACTOR FIX
+# ----------------------------------
+
+# Lock factor order in size_data
+size_data$size_class <- factor(
+  size_data$size_class,
+  levels = c("Small (2mm)",
+             "Medium (6mm)",
+             "Large (12mm+)")
+)
+# One consistent color palette
+crab_colors <- c(
+  "Small (2mm)"   = "#9ecae1",
+  "Medium (6mm)"  = "#3182bd",
+  "Large (12mm+)" = "#08306b"
+)
+```
+
+```{r}
+# ----------------------------------
+# RAW COUNT DISTRIBUTION
+# ----------------------------------
+
+ggplot(size_data, aes(x = count)) +
+  geom_histogram(bins = 40) +
+  theme_classic() +
+  labs(title = "Distribution of Mole Crab Counts",
+       x = "Count per Sample",
+       y = "Frequency")
+# ----------------------------------
+# Zero Proportion
+# ----------------------------------
+
+zero_prop <- mean(size_data$count == 0)
+cat("Proportion of zero counts:", round(zero_prop, 3), "\n")
+
+range(size_data$water_temp, na.rm = TRUE)
+range(size_data$count, na.rm = TRUE)
+range(clean_data$date)
+
+# ----------------------------------
+# OUTLIER CHECK (Raw Counts)
+# ----------------------------------
+
+summary(size_data$count)
+
+quantile(size_data$count, probs = c(0.95, 0.99, 1), na.rm = TRUE)
+
+boxplot(size_data$count,
+        main = "Raw Count Distribution",
+        ylab = "Count")
+
+```
+
+```{r}
+# -----------------------------------------
+# FINAL MAP
+# -----------------------------------------
+
+site_summary <- size_data %>%
+  group_by(location) %>%
+  summarise(
+    n_samples = n(),
+    mean_abundance = mean(count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------------
+# Manual coastal coordinates (aligned vertically)
+# ----------------------------------
+
+site_coords <- data.frame(
+  location = c("sandy_hook","bluffs","south_bath","deal","ocean_grove"),
+  lat = c(40.445, 40.300, 40.292, 40.245, 40.210),
+  lon = c(-73.990, -74.000, -74.003, -74.025, -74.010)
+)
+
+site_summary <- left_join(site_summary, site_coords, by = "location")
+
+# Clean labels
+site_summary$location_clean <- dplyr::recode(site_summary$location,
+  sandy_hook  = "Sandy Hook",
+  bluffs      = "Bluffs",
+  south_bath  = "South Bath",
+  deal        = "Deal",
+  ocean_grove = "Ocean Grove"
+)
+
+# ----------------------------------
+# Label positioning (original spacing)
+# ----------------------------------
+
+site_summary <- site_summary %>%
+  mutate(
+    label_lon = lon - 0.025,
+    label_lat = case_when(
+      location == "sandy_hook" ~ lat + 0.01,
+      location == "bluffs" ~ lat + 0.010,
+      location == "south_bath" ~ lat - 0.010,
+      location == "deal" ~ lat - 0.005,
+      location == "ocean_grove" ~ lat - 0.008,
+      TRUE ~ lat
+    )
+  )
+
+# ----------------------------------
+# NJ Map
+# ----------------------------------
+
+nj_map <- map_data("state") %>%
+  filter(region == "new jersey")
+
+# ----------------------------------
+# Nourishment Reach (original position)
+# ----------------------------------
+
+nourishment_line <- data.frame(
+  lon = c(-73.992, -73.998, -74.008, -74.020),
+  lat = c(40.360, 40.305, 40.230, 40.150)
+)
+
+# ----------------------------------
+# Plot
+# ----------------------------------
+
+ggplot() +
+  
+  geom_polygon(data = nj_map,
+               aes(x = long, y = lat, group = group),
+               fill = "grey90",
+               color = "grey50",
+               linewidth = 0.4) +
+  
+  geom_path(data = nourishment_line,
+            aes(x = lon, y = lat),
+            color = "red",
+            linewidth = 2.8,
+            alpha = 0.9) +
+  
+  annotate("text",
+           x = -73.975,
+           y = 40.26,
+           label = "Nourishment Area",
+           color = "red",
+           size = 5,
+           fontface = "bold",
+           hjust = 0) +
+  
+  geom_point(data = site_summary,
+             aes(x = lon, y = lat,
+                 fill = mean_abundance),
+             shape = 21,
+             size = 8,
+             color = "black",
+             stroke = 1.3) +
+  
+  geom_text(data = site_summary,
+            aes(x = label_lon,
+                y = label_lat,
+                label = paste0(location_clean,
+                               "\n(n = ", n_samples, ")")),
+            hjust = 1,
+            size = 4,
+            fontface = "bold",
+            lineheight = 0.9) +
+  
+  scale_fill_gradient(
+    low = "#c6dbef",
+    high = "#08306b",
+    name = "Mean Abundance\n(crabs per scoop)"
+  ) +
+  
+  coord_quickmap(
+    xlim = c(-74.15, -73.82),
+    ylim = c(40.15, 40.50)
+  ) +
+  
+  theme_classic(base_size = 18) +
+  
+  theme(
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 20)
+  ) +
+  
+  labs(
+    title = "Sampling Sites 2020-2025",
+    subtitle = "Monmouth County, New Jersey",
+    x = "Longitude",
+    y = "Latitude"
+  )
+```
+
+```{r}
+# ==========================================
+# OBSERVED TEMPORAL TREND
+# (CRABS PER SCOOP)
+# ==========================================
+
+observed_size <- size_data %>%
+  group_by(year, size_class) %>%
+  summarise(
+    mean_per_scoop = mean(count, na.rm = TRUE),
+    se = sd(count, na.rm = TRUE) / sqrt(n()),
+    lower = mean_per_scoop - 1.96 * se,
+    upper = mean_per_scoop + 1.96 * se,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    year_num = as.numeric(as.character(year))
+  )
+
+ggplot(observed_size,
+       aes(x = year_num,
+           y = mean_per_scoop,
+           color = size_class,
+           fill = size_class,
+           group = size_class)) +
+  
+  geom_ribbon(aes(ymin = lower,
+                  ymax = upper),
+              alpha = 0.15,
+              color = NA) +
+  
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3.5) +
+  
+  scale_color_manual(values = crab_colors) +
+  scale_fill_manual(values = crab_colors) +
+  
+  scale_x_continuous(
+    breaks = sort(unique(observed_size$year_num))
+  ) +
+  
+  theme_classic(base_size = 18) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 20)
+  ) +
+  
+  labs(
+    x = "Year",
+    y = "Mean Abundance (Crabs per Scoop)",
+    color = "Size Class",
+    fill  = "Size Class",
+    title = "Observed Temporal Abundance by Size Class"
+  )
+```
+
+```{r}
+# ----------------------------------
+# OBSERVED TEMPERATURE RELATIONSHIP
+# (CRABS PER SCOOP)
+# ----------------------------------
+
+# ---- Add per-scoop standardization ----
+size_data_temp <- size_data %>%
+  filter(scoops > 0) %>%
+  mutate(
+    cps = count / scoops   # crabs per scoop
+  )
+
+# ---- Binned summary ----
+obs_temp <- size_data_temp %>%
+  mutate(temp_bin = round(water_temp * 2) / 2) %>%   # 0.5°C bins
+  group_by(size_class, temp_bin) %>%
+  summarise(
+    mean_cps = mean(cps, na.rm = TRUE),
+    se = sd(cps, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  filter(n >= 5)
+
+ggplot() +
+  
+  # ---- Raw data points ----
+  geom_jitter(
+    data = size_data_temp,
+    aes(x = water_temp,
+        y = pmax(cps, 0.01),
+        color = size_class),
+    width = 0.15,
+    alpha = 0.25,
+    size = 1.5
+  ) +
+  
+  # ---- SE ribbon ----
+  geom_ribbon(
+    data = obs_temp,
+    aes(x = temp_bin,
+        ymin = pmax(mean_cps - se, 0.01),
+        ymax = mean_cps + se,
+        fill = size_class,
+        group = size_class),
+    alpha = 0.18,
+    color = NA
+  ) +
+  
+  # ---- Mean line ----
+  geom_line(
+    data = obs_temp,
+    aes(x = temp_bin,
+        y = mean_cps,
+        color = size_class,
+        group = size_class),
+    linewidth = 1.5
+  ) +
+  
+  # ---- Mean points ----
+  geom_point(
+    data = obs_temp,
+    aes(x = temp_bin,
+        y = mean_cps,
+        color = size_class),
+    size = 3
+  ) +
+  
+  scale_y_log10(
+    limits = c(0.05, 150),
+    breaks = c(0.1, 1, 10, 100)
+  ) +
+  
+  scale_color_manual(values = crab_colors) +
+  scale_fill_manual(values = crab_colors) +
+  
+  theme_classic(base_size = 18) +
+  
+  labs(
+    x = "Water Temperature (°C)",
+    y = "Mean Abundance (log scale crabs per scoop)",
+    color = "Size Class",
+    fill  = "Size Class",
+    title = "Observed Temperature and Mole Crab Abundance"
+  )
+```
+
+```{r}
+# ==========================================
+# BIOMASS DECLINE
+# ==========================================
+
+# ---- Compute biomass ----
+biomass_zone <- size_data %>%
+  filter(year %in% c("2021","2022","2023","2024","2025"),
+         zone %in% c("bore","swash")) %>%
+  mutate(
+    size_mm = case_when(
+      size_class == "Small (2mm)" ~ 2,
+      size_class == "Medium (6mm)" ~ 6,
+      size_class == "Large (12mm+)" ~ 12
+    ),
+    biomass_proxy = count * size_mm
+  ) %>%
+  group_by(zone, year) %>%
+  summarise(
+    mean_biomass = mean(biomass_proxy, na.rm = TRUE),
+    se = sd(biomass_proxy, na.rm = TRUE) / sqrt(n()),
+    lower = mean_biomass - 1.96 * se,
+    upper = mean_biomass + 1.96 * se,
+    .groups = "drop"
+  ) %>%
+  mutate(year_num = as.numeric(as.character(year)))
+
+# ---- Calculate recovery metrics ----
+metrics <- biomass_zone %>%
+  filter(year %in% c("2021","2024","2025")) %>%
+  dplyr::select(zone, year, mean_biomass) %>%
+  pivot_wider(names_from = year,
+              values_from = mean_biomass)
+
+# Collapse (should be nearly identical across zones)
+collapse_pct <- round(
+  mean((1 - metrics$`2024` / metrics$`2021`) * 100),
+  0
+)
+
+# Zone-specific net recovery
+metrics <- metrics %>%
+  mutate(
+    Net_Recovery = round((`2025` / `2021`) * 100, 0)
+  )
+
+swash_recovery <- metrics$Net_Recovery[metrics$zone == "swash"]
+bore_recovery  <- metrics$Net_Recovery[metrics$zone == "bore"]
+
+# ---- Disturbance Band ----
+disturbance <- data.frame(
+  xmin = 2023,
+  xmax = 2024,
+  ymin = min(biomass_zone$lower),
+  ymax = max(biomass_zone$upper)
+)
+
+# ---- Plot ----
+ggplot(biomass_zone,
+       aes(x = year_num,
+           y = mean_biomass,
+           color = zone,
+           fill = zone,
+           group = zone)) +
+
+  geom_rect(data = disturbance,
+            inherit.aes = FALSE,
+            aes(xmin = xmin,
+                xmax = xmax,
+                ymin = ymin,
+                ymax = ymax),
+            fill = "red",
+            alpha = 0.07) +
+
+  geom_ribbon(aes(ymin = lower,
+                  ymax = upper),
+              alpha = 0.18,
+              color = NA) +
+
+  geom_line(linewidth = 2) +
+  geom_point(size = 4) +
+
+  # ---- Dynamic Annotations ----
+  annotate("text",
+           x = 2023.5,
+           y = max(biomass_zone$upper) * 0.5,
+           label = paste0("Beach Nourishment\n~",
+                          collapse_pct, "% Collapse from baseline"),
+           color = "red",
+           fontface = "bold",
+           size = 5,
+           hjust = 0.5) +
+  scale_color_manual(values = c("bore" = "darkgreen",
+                                "swash" = "limegreen")) +
+  scale_fill_manual(values = c("bore" = "darkgreen",
+                               "swash" = "limegreen")) +
+
+  scale_x_continuous(breaks = c(2021,2022,2023,2024,2025)) +
+
+  theme_classic(base_size = 20) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 22),
+    legend.position = "top"
+  ) +
+
+  labs(
+    x = "Year",
+    y = "Mean Biomass (mm × count)",
+    color = "Zone",
+    fill = "Zone",
+    title = "Zone-Specific Biomass Collapse and Divergent Recovery",
+    subtitle = "Baseline biomass estimated at 2021-2022"
+  )
+```
+
+```{r}
+# ==============================
+# Demographic Trend over the Years
+# ==============================
+
+size_demo <- size_data %>%
+  group_by(year, size_class) %>%
+  summarise(total = sum(count), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(prop = total / sum(total)) %>%
+  ungroup() %>%
+  mutate(year_num = as.numeric(as.character(year)))
+# ==============================
+# Plot
+# ==============================
+
+ggplot(size_demo,
+       aes(x = year_num,
+           y = prop,
+           fill = size_class)) +
+  
+  # Stacked proportions FIRST
+  geom_area(color = "white", linewidth = 0.3) +
+  scale_fill_manual(values = crab_colors) +
+  
+  scale_x_continuous(
+    breaks = sort(unique(size_demo$year_num))
+  ) +
+  
+  coord_cartesian(ylim = c(0, 1.1), clip = "off") +
+  
+  theme_classic(base_size = 18) +
+  
+  labs(
+    x = "Year",
+    y = "Proportion of Total Abundance",
+    fill = "Size Class",
+    title = "Temporal Trend in Demographics"
+  )
+```
+
+```{r}
+# ==========================================
+# ZONE-SPECIFIC RAW DEMOGRAPHIC ABUNDANCE
+# ==========================================
+zone_data <- clean_data %>%
+  filter(!location %in% c("ocean_grove","sandy_hook"),
+         zone %in% c("bore","swash"),
+         year %in% c("2021","2022","2023","2024","2025")) %>%
+  mutate(
+    year = factor(year,
+                  levels = c("2021","2022","2023","2024","2025")),
+    zone = factor(zone,
+                  levels = c("swash","bore"),
+                  labels = c("Swash Zone","Bore Zone"))
+  )
+
+# ---- TRUE total abundance per zone/year (no inflation) ----
+zone_totals <- zone_data %>%
+  group_by(zone, year) %>%
+  summarise(
+    total_n = sum(ct_2mm + ct_6mm + ct_12mm, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---- Pivot to long for stacked bars ----
+zone_counts <- zone_data %>%
+  group_by(zone, year) %>%
+  summarise(
+    Small  = sum(ct_2mm,  na.rm = TRUE),
+    Medium = sum(ct_6mm,  na.rm = TRUE),
+    Large  = sum(ct_12mm, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(Small, Medium, Large),
+    names_to = "size_class",
+    values_to = "total"
+  ) %>%
+  mutate(
+    size_class = factor(size_class,
+      levels = c("Small","Medium","Large"),
+      labels = c("Small (2mm)",
+                 "Medium (6mm)",
+                 "Large (12mm+)")
+    )
+  )
+
+# ---- Plot ----
+ggplot(zone_counts,
+       aes(x = year,
+           y = total,
+           fill = size_class)) +
+  
+  geom_col() +
+  
+  facet_wrap(~ zone, nrow = 1) +
+  
+  geom_text(data = zone_totals,
+            aes(x = year,
+                y = total_n,
+                label = paste0("n = ", total_n)),
+            inherit.aes = FALSE,
+            vjust = -0.3,
+            size = 4,
+            fontface = "bold") +
+  
+  scale_fill_manual(values = crab_colors) +
+  
+  theme_classic(base_size = 18) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    axis.title = element_text(face = "bold")
+  ) +
+  
+  labs(
+    x = "Year",
+    y = "Total Abundance (Raw Counts)",
+    fill = "Size Class",
+    title = "Zone-Specific Raw Abundance by Size Class (2021–2025)"
+  )
+```
+
+```{r}
+# ==========================================
+# SAMPLE-LEVEL DEMOGRAPHIC TESTS (FIXED)
+# ==========================================
+
+# ------------------------------------------
+# 1. Build Independent Sample Dataset
+# ------------------------------------------
+
+sample_struct <- size_data %>%
+  group_by(date, location, zone, year) %>%
+  summarise(
+    small  = sum(count[size_class == "Small (2mm)"]),
+    medium = sum(count[size_class == "Medium (6mm)"]),
+    large  = sum(count[size_class == "Large (12mm+)"]),
+    total  = small + medium + large,
+    .groups = "drop"
+  ) %>%
+  filter(total > 0) %>%
+  drop_na(year, zone)   # FORCE same rows for all models
+
+# ------------------------------------------
+# 2. GLOBAL DEMOGRAPHIC SHIFT
+# ------------------------------------------
+
+global_data <- sample_struct   # lock dataset
+
+global_model <- glm(
+  cbind(small, total - small) ~ year + zone,
+  family = quasibinomial,
+  data = global_data
+)
+
+global_null <- glm(
+  cbind(small, total - small) ~ zone,
+  family = quasibinomial,
+  data = global_data
+)
+
+cat("\n===== GLOBAL DEMOGRAPHIC SHIFT =====\n")
+print(summary(global_model))
+
+cat("\n===== LRT: YEAR EFFECT =====\n")
+print(anova(global_null, global_model, test = "F"))
+
+# ------------------------------------------
+# 3. BASELINE HABITAT PARTITIONING
+# ------------------------------------------
+
+baseline_data <- sample_struct %>%
+  filter(year %in% c("2021","2022"))
+
+baseline_model <- glm(
+  cbind(large, total - large) ~ zone,
+  family = quasibinomial,
+  data = baseline_data
+)
+deviance(baseline_model) / df.residual(baseline_model)
+cat("\n===== BASELINE ADULT PARTITION =====\n")
+print(summary(baseline_model))
+
+# ------------------------------------------
+# 4. PHASE EFFECT ON ADULT STRUCTURE
+# ------------------------------------------
+
+phase_data <- sample_struct %>%
+  mutate(
+    phase = case_when(
+      year %in% c("2021","2022") ~ "Baseline",
+      year %in% c("2023","2024") ~ "Disturbance",
+      year == "2025" ~ "Recovery",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(phase))   # ensure same rows for both models
+
+adult_model <- glm(
+  cbind(large, total - large) ~ phase + zone,
+  family = quasibinomial,
+  data = phase_data
+)
+
+adult_null <- glm(
+  cbind(large, total - large) ~ zone,
+  family = quasibinomial,
+  data = phase_data
+)
+
+cat("\n===== ADULT STRUCTURE ~ PHASE =====\n")
+print(summary(adult_model))
+
+cat("\n===== LRT: PHASE EFFECT ON ADULT STRUCTURE =====\n")
+print(anova(adult_null, adult_model, test = "F"))
+
+# ------------------------------------------
+# 5. PHASE EFFECT ON JUVENILE STRUCTURE
+# ------------------------------------------
+
+juvenile_model <- glm(
+  cbind(small, total - small) ~ phase + zone,
+  family = quasibinomial,
+  data = phase_data
+)
+
+juvenile_null <- glm(
+  cbind(small, total - small) ~ zone,
+  family = quasibinomial,
+  data = phase_data
+)
+
+cat("\n===== JUVENILE STRUCTURE ~ PHASE =====\n")
+print(summary(juvenile_model))
+
+cat("\n===== LRT: PHASE EFFECT ON JUVENILE STRUCTURE =====\n")
+print(anova(juvenile_null, juvenile_model, test = "F"))
+```
+
+```{r}
+# ==========================================
+# STRUCTURAL BREAK – BASELINE vs DISTURBANCE
+# ==========================================
+
+# ---- 1. Create dominant size class per sample ----
+sample_demo <- sample_struct %>%
+  mutate(
+    dominant_class = case_when(
+  small == medium & medium == large ~ NA_character_,
+  small  >= medium & small  >= large ~ "Small",
+  medium >= small  & medium >= large ~ "Medium",
+  large  >= small  & large  >= medium ~ "Large",
+  TRUE ~ NA_character_
+)
+  )
+
+# ---- 2. Collapse to 2 phases (Baseline vs Disturbance) ----
+sample_break <- sample_demo %>%
+  filter(year %in% c("2021","2022","2023","2024")) %>%
+  mutate(
+    phase = ifelse(
+      year %in% c("2021","2022"),
+      "Baseline",
+      "Disturbance"
+    ),
+    phase = factor(phase,
+                   levels = c("Baseline","Disturbance"))
+  )
+
+# ---- 3. Build contingency table ----
+demo_table <- table(sample_break$phase,
+                    sample_break$dominant_class)
+
+print(demo_table)
+
+# ---- 4. Check expected counts ----
+chi_test <- chisq.test(demo_table)
+
+print(chi_test)
+print(chi_test$expected)
+
+# ---- 5. If expected counts < 5, use simulated p-value ----
+if(any(chi_test$expected < 5)) {
+  chi_test <- chisq.test(demo_table,
+                         simulate.p.value = TRUE,
+                         B = 10000)
+  cat("\nUsing simulated p-value (small sample correction)\n")
+  print(chi_test)
+}
+
+# ---- 6. Compute Cramér’s V ----
+n_total <- sum(demo_table)
+
+min_dim <- min(nrow(demo_table) - 1,
+               ncol(demo_table) - 1)
+
+cramers_v <- sqrt(
+  as.numeric(chi_test$statistic) /
+  (n_total * min_dim)
+)
+
+cat("\nCramer's V (Baseline vs Disturbance):",
+    round(cramers_v, 3), "\n")
+```
+
+```{r}
+# ------------------------------------------
+# Baseline Ontogenetic Partitioning
+# (Contingency-table version for effect size)
+# ------------------------------------------
+
+baseline_struct <- sample_struct %>%
+  filter(year %in% c("2021","2022"))
+
+# Adult dominant vs zone
+baseline_struct <- baseline_struct %>%
+  mutate(adult_dominant = large > medium & large > small)
+
+partition_table <- table(
+  baseline_struct$zone,
+  baseline_struct$adult_dominant
+)
+
+chi_part <- chisq.test(partition_table)
+
+print(chi_part)
+
+n_part <- sum(partition_table)
+
+cramers_v_part <- sqrt(
+  as.numeric(chi_part$statistic) /
+    (n_part * (min(dim(partition_table)) - 1))
+)
+
+cramers_v_part <- round(cramers_v_part, 2)
+
+cat("\nCramer's V =", cramers_v_part, "\n")
+```
+
+```{r}
+# ==========================================
+# TEST: BASELINE STABILITY (2021 vs 2022)
+# ==========================================
+
+baseline_test_data <- size_data %>%
+  filter(year %in% c("2021","2022"),
+         location != "sandy_hook",
+         scoops > 0) %>%
+  mutate(
+    year = factor(year),
+    log_scoops = log(scoops)
+  )
+
+nb_null_2122 <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class +
+          location +
+          zone,
+  data = baseline_test_data
+)
+
+nb_year_2122 <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class +
+          location +
+          zone +
+          year,
+  data = baseline_test_data
+)
+
+baseline_lrt <- anova(nb_null_2122,
+                      nb_year_2122,
+                      test="LRT")
+
+print(baseline_lrt)
+```
+
+```{r}
+# ----------------------------------
+# CREATE MODELING DATASET
+# (Baseline collapsed 2021–2022)
+# ----------------------------------
+
+analysis_data <- size_data %>%
+  
+  # Exclude control/outside site
+  filter(location != "sandy_hook") %>%
+  
+  # Remove zero effort
+  filter(scoops > 0) %>%
+  
+  mutate(
+    # Log sampling effort
+    log_scoops = log(scoops),
+    
+    # Center date
+    date_numeric = as.numeric(date),
+    date_c = date_numeric - mean(date_numeric, na.rm = TRUE),
+    
+    # Center environmental predictors
+    salinity_c = salinity - mean(salinity, na.rm = TRUE),
+    do_c = do_mg_l - mean(do_mg_l, na.rm = TRUE),
+    air_temp_c = air_temp_deg_c - mean(air_temp_deg_c, na.rm = TRUE),
+    
+    # ---- Collapse 2021–2022 to Baseline ----
+    year = case_when(
+      year %in% c("2021","2022") ~ "Baseline",
+      TRUE ~ as.character(year)
+    ),
+    
+    year = factor(year,
+                  levels = c("Baseline",
+                             "2023",
+                             "2024",
+                             "2025")),
+    
+    zone = factor(zone, levels = c("bore","swash")),
+    groin = factor(groin, levels = c("North","South"))
+  ) %>%
+  
+  drop_na(count, scoops, size_class, location, year) %>%
+  droplevels()
+
+# Set reference levels
+analysis_data$location <- relevel(analysis_data$location,
+                                  ref = "south_bath")
+
+analysis_data$year <- relevel(analysis_data$year,
+                              ref = "Baseline")
+```
+
+```{r}
+# ==========================================
+# FORMAL TEST: ZONE × YEAR INTERACTION
+# Likelihood Ratio Test (LRT)
+# ==========================================
+
+# ----------------------------------
+# Fit Model WITHOUT interaction
+# (Assumes same temporal trend in both zones)
+# ----------------------------------
+
+nb_no_interaction <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class +
+          location +
+          zone +
+          year,
+  data = analysis_data,
+  control = glm.control(maxit = 200)
+)
+
+# ----------------------------------
+# Fit Model WITH interaction
+# (Allows temporal trends to differ by zone)
+# ----------------------------------
+
+nb_with_interaction <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class +
+          location +
+          zone * year,
+  data = analysis_data,
+  control = glm.control(maxit = 200)
+)
+
+# ----------------------------------
+# Likelihood Ratio Test
+# ----------------------------------
+
+lrt_result <- anova(nb_no_interaction,
+                    nb_with_interaction,
+                    test = "LRT")
+
+print(lrt_result)
+
+# ----------------------------------
+# Zone × Year IRRs From Interaction Model
+# ----------------------------------
+
+coefs <- coef(nb_with_interaction)
+vc    <- vcov(nb_with_interaction)
+
+years_to_extract <- c("2023","2024","2025")
+
+zone_year_irr <- lapply(years_to_extract, function(yr) {
+  
+  year_term  <- paste0("year", yr)
+  inter_term <- paste0("zoneswash:year", yr)
+  
+  # -------------------------
+  # Bore (reference zone)
+  # -------------------------
+  
+  beta_bore <- coefs[year_term]
+  var_bore  <- vc[year_term, year_term]
+  se_bore   <- sqrt(var_bore)
+  
+  irr_bore  <- exp(beta_bore)
+  lwr_bore  <- exp(beta_bore - 1.96 * se_bore)
+  upr_bore  <- exp(beta_bore + 1.96 * se_bore)
+  
+  # -------------------------
+  # Swash
+  # -------------------------
+  
+  beta_swash <- coefs[year_term] + coefs[inter_term]
+  
+  var_swash <- vc[year_term, year_term] +
+               vc[inter_term, inter_term] +
+               2 * vc[year_term, inter_term]
+  
+  se_swash <- sqrt(var_swash)
+  
+  irr_swash <- exp(beta_swash)
+  lwr_swash <- exp(beta_swash - 1.96 * se_swash)
+  upr_swash <- exp(beta_swash + 1.96 * se_swash)
+  
+  rbind(
+    data.frame(
+      Zone = "Bore",
+      Year = yr,
+      IRR = irr_bore,
+      Lower_95CI = lwr_bore,
+      Upper_95CI = upr_bore,
+      Percent_Change = (1 - irr_bore) * 100
+    ),
+    data.frame(
+      Zone = "Swash",
+      Year = yr,
+      IRR = irr_swash,
+      Lower_95CI = lwr_swash,
+      Upper_95CI = upr_swash,
+      Percent_Change = (1 - irr_swash) * 100
+    )
+  )
+})
+
+zone_year_irr <- do.call(rbind, zone_year_irr)
+rownames(zone_year_irr) <- NULL
+print(zone_year_irr)
+summary(nb_with_interaction)$coefficients[
+  grep("year2022|zoneswash:year2022",
+       rownames(summary(nb_with_interaction)$coefficients)), ]
+summary(nb_with_interaction)$coefficients[
+  grep("zoneswash:year2025",
+       rownames(summary(nb_with_interaction)$coefficients)), ]
+```
+
+```{r}
+# ==========================================
+# PRIMARY DEMOGRAPHIC MODEL
+# ==========================================
+
+nb_final <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class + location +
+          zone * year,
+  data = analysis_data,
+  control = glm.control(maxit = 200)
+)
+
+summary(nb_final)
+coef_table <- summary(nb_final)$coefficients
+cat("\nModel AIC:", AIC(nb_final), "\n")
+cat("NB theta:", nb_final$theta, "\n")
+mm <- model.matrix(nb_final)
+qr(mm)$rank == ncol(mm)
+```
+
+```{r}
+# ==========================================
+# MODEL-BASED TEMPORAL TREND
+# With Beach Nourishment Annotation
+# ==========================================
+
+analysis_data$fitted <- fitted(nb_final)
+
+model_year <- analysis_data %>%
+  group_by(year, size_class) %>%
+  summarise(
+    mean_fit = mean(fitted),
+    se = sd(fitted) / sqrt(n()),
+    lower = mean_fit - 1.96 * se,
+    upper = mean_fit + 1.96 * se,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    mean_fit = pmax(mean_fit, 1e-6),
+    lower = pmax(lower, 1e-6),
+    upper = pmax(upper, 1e-6),
+    year_num = case_when(
+      year == "Baseline" ~ 2021.5,
+      year == "2023" ~ 2023,
+      year == "2024" ~ 2024,
+      year == "2025" ~ 2025
+    )
+  )
+
+# ----------------------------------
+# Calculate % decline Baseline → 2024
+# ----------------------------------
+
+baseline_vals <- model_year %>%
+  filter(year == "Baseline") %>%
+  dplyr::select(size_class, mean_fit)
+
+yr2024_vals <- model_year %>%
+  filter(year == "2024") %>%
+  dplyr::select(size_class, mean_fit)
+
+decline_df <- left_join(baseline_vals,
+                        yr2024_vals,
+                        by = "size_class",
+                        suffix = c("_base", "_2024")) %>%
+  mutate(
+    pct_decline = round(
+      100 * (1 - mean_fit_2024 / mean_fit_base), 1
+    )
+  )
+
+# ----------------------------------
+# Build annotation text (OUTSIDE ggplot)
+# ----------------------------------
+
+decline_text <- decline_df %>%
+  arrange(size_class) %>%
+  mutate(line = paste0(size_class, ": -", pct_decline, "%")) %>%
+  summarise(label = paste0(
+    "Beach Nourishment\n",
+    paste(line, collapse = "\n")
+  ))
+
+annotation_df <- data.frame(
+  x = 2023.5,
+  y = max(model_year$upper) * 0.9,
+  label = decline_text$label
+)
+
+# ----------------------------------
+# Disturbance ribbon
+# ----------------------------------
+
+disturbance_band <- data.frame(
+  xmin = 2023,
+  xmax = 2024,
+  ymin = 0,
+  ymax = max(model_year$upper)
+)
+
+# ----------------------------------
+# Plot
+# ----------------------------------
+
+ggplot(model_year,
+       aes(x = year_num,
+           y = mean_fit,
+           color = size_class,
+           fill = size_class,
+           group = size_class)) +
+  
+  geom_rect(data = disturbance_band,
+            inherit.aes = FALSE,
+            aes(xmin = xmin,
+                xmax = xmax,
+                ymin = ymin,
+                ymax = ymax),
+            fill = "red",
+            alpha = 0.05) +
+  
+  geom_ribbon(aes(ymin = lower,
+                  ymax = upper),
+              alpha = 0.18,
+              color = NA) +
+  
+  geom_line(linewidth = 1.8) +
+  geom_point(size = 3.5) +
+  
+  geom_text(data = annotation_df,
+            aes(x = x, y = y, label = label),
+            fontface = "bold",
+            size = 5,
+            color = "red",
+            hjust = 0.5,
+            inherit.aes = FALSE) +
+  
+  scale_color_manual(values = crab_colors) +
+  scale_fill_manual(values = crab_colors) +
+  
+  scale_x_continuous(
+    breaks = c(2021.5, 2023, 2024, 2025),
+    labels = c("2021–2022\nBaseline", "2023", "2024", "2025")
+  ) +
+  
+  theme_classic(base_size = 18) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 20)
+  ) +
+  
+  labs(
+    x = "Year",
+    y = "Model-Predicted Abundance",
+    color = "Size Class",
+    fill  = "Size Class",
+    title = "Model-Adjusted Temporal Abundance",
+    subtitle = "Negative binomial model controlling for temperature, effort, and location"
+  )
+```
+
+```{r}
+# ==========================================
+# SIZE-SPECIFIC TEMPERATURE EFFECTS
+# ==========================================
+
+coefs <- coef(nb_final)
+vc    <- vcov(nb_final)
+
+sizes <- levels(analysis_data$size_class)
+
+temp_effects <- lapply(sizes, function(s) {
+
+  beta <- coefs["water_temp_c"]
+  var  <- vc["water_temp_c", "water_temp_c"]
+
+  interaction_term <- paste0("water_temp_c:size_class", s)
+
+  if (interaction_term %in% names(coefs)) {
+    beta <- beta + coefs[interaction_term]
+    var  <- var +
+      vc[interaction_term, interaction_term] +
+      2 * vc["water_temp_c", interaction_term]
+  }
+
+  se <- sqrt(var)
+
+  IRR  <- exp(beta)
+  LWR  <- exp(beta - 1.96 * se)
+  UPR  <- exp(beta + 1.96 * se)
+
+  data.frame(
+    Size_Class = s,
+    IRR_per_1C = IRR,
+    Lower_95CI = LWR,
+    Upper_95CI = UPR,
+    Percent_Change = (1 - IRR) * 100
+  )
+})
+
+temp_effects <- do.call(rbind, temp_effects)
+
+#Remove inherited row names
+rownames(temp_effects) <- NULL
+
+print(temp_effects, digits = 3)
+```
+
+```{r}
+# ============================================================
+# PHASE-SPECIFIC TEMPERATURE FILTERING MODEL
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. Create Phase Variable (DO NOT remove year)
+# ------------------------------------------------------------
+analysis_data$phase <- case_when(
+  analysis_data$year == "Baseline" ~ "Baseline",
+  analysis_data$year %in% c("2023","2024") ~ "Disturbance",
+  analysis_data$year == "2025" ~ "Recovery"
+)
+
+analysis_data$phase <- factor(
+  analysis_data$phase,
+  levels = c("Baseline","Disturbance","Recovery")
+)
+
+# ------------------------------------------------------------
+# 2. Fit Temperature × Size × Phase Model
+#    (NO zone*year here — avoids redundancy)
+# ------------------------------------------------------------
+nb_phase_temp <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class * phase +
+          location +
+          zone,
+  data = analysis_data,
+  control = glm.control(maxit = 200)
+)
+
+summary(nb_phase_temp)
+
+# ------------------------------------------------------------
+# 3. Likelihood Ratio Test
+#    Does temperature filtering vary by phase?
+# ------------------------------------------------------------
+nb_phase_null <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c * size_class +
+          location +
+          zone,
+  data = analysis_data,
+  control = glm.control(maxit = 200)
+)
+
+anova(nb_phase_null, nb_phase_temp, test = "LRT")
+
+# ==========================================
+# 4. CLEAN TEMPERATURE SLOPE SUMMARY TABLE
+# (IRR per 1°C by Size × Phase)
+# ==========================================
+
+coefs <- coef(nb_phase_temp)
+vc    <- vcov(nb_phase_temp)
+
+sizes  <- levels(analysis_data$size_class)
+phases <- levels(analysis_data$phase)
+
+temp_summary <- list()
+counter <- 1
+
+for (p in phases) {
+  for (s in sizes) {
+    
+    # Base temperature term
+    beta <- coefs["water_temp_c"]
+    var  <- vc["water_temp_c", "water_temp_c"]
+    
+    # Size interaction
+    size_term <- paste0("water_temp_c:size_class", s)
+    if (size_term %in% names(coefs)) {
+      beta <- beta + coefs[size_term]
+      var  <- var +
+        vc[size_term, size_term] +
+        2 * vc["water_temp_c", size_term]
+    }
+    
+    # Phase interaction
+    phase_term <- paste0("water_temp_c:phase", p)
+    if (phase_term %in% names(coefs)) {
+      beta <- beta + coefs[phase_term]
+      var  <- var +
+        vc[phase_term, phase_term] +
+        2 * vc["water_temp_c", phase_term]
+    }
+    
+    # Size × Phase interaction
+    sp_term <- paste0("water_temp_c:size_class", s, ":phase", p)
+    if (sp_term %in% names(coefs)) {
+      beta <- beta + coefs[sp_term]
+      var  <- var +
+        vc[sp_term, sp_term] +
+        2 * vc["water_temp_c", sp_term]
+    }
+    
+    se <- sqrt(var)
+    
+    IRR  <- exp(beta)
+    LWR  <- exp(beta - 1.96 * se)
+    UPR  <- exp(beta + 1.96 * se)
+    
+    temp_summary[[counter]] <- data.frame(
+      Phase = p,
+      Size_Class = s,
+      Beta = beta,
+      IRR_per_1C = IRR,
+      Lower_95CI = LWR,
+      Upper_95CI = UPR,
+      Percent_Change = (1 - IRR) * 100
+    )
+    
+    counter <- counter + 1
+  }
+}
+
+temp_summary <- bind_rows(temp_summary)
+
+# Clean formatting
+temp_summary$Percent_Change <-
+  round(temp_summary$Percent_Change, 1)
+
+temp_summary$IRR_per_1C <-
+  round(temp_summary$IRR_per_1C, 3)
+
+temp_summary$Lower_95CI <-
+  round(temp_summary$Lower_95CI, 3)
+
+temp_summary$Upper_95CI <-
+  round(temp_summary$Upper_95CI, 3)
+
+print(temp_summary)
+```
+
+```{r}
+# ==========================================
+# FORMAL TEST: Zero Inflation (Sample-Level)
+# ==========================================
+
+sample_level <- clean_data %>%
+  filter(location != "sandy_hook") %>%
+  filter(scoops > 0) %>%
+  mutate(
+    total_count = ct_2mm + ct_6mm + ct_12mm,
+    phase = case_when(
+      year %in% c("2021","2022") ~ "Baseline",
+      year %in% c("2023","2024") ~ "Disturbance",
+      year == "2025" ~ "Recovery",
+      TRUE ~ NA_character_
+    ),
+    phase = factor(phase,
+                   levels = c("Baseline","Disturbance","Recovery")),
+    zero_flag = ifelse(total_count == 0, 1, 0)
+  ) %>%
+  filter(!is.na(phase))
+
+logit_zero_sample <- glm(
+  zero_flag ~ phase + log(scoops),
+  family = binomial,
+  data = sample_level
+)
+
+summary(logit_zero_sample)
+
+cat("\nOdds ratios for zero probability (sample-level):\n")
+print(exp(cbind(
+  OR = coef(logit_zero_sample),
+  confint.default(logit_zero_sample)
+)))
+```
+
+```{r disturbance_clock, eval=knitr::is_html_output()}
+library(DiagrammeR)
+library(dplyr)
+library(vegan)
+
+# =====================================================
+# SHANNON INDEX
+# =====================================================
+
+shannon_data <- clean_data %>%
+  mutate(total = ct_2mm + ct_6mm + ct_12mm) %>%
+  filter(total > 0)
+
+mean_shannon <- round(
+  mean(diversity(shannon_data[,c("ct_2mm","ct_6mm","ct_12mm")],
+  index="shannon"), na.rm = TRUE), 2)
+
+# =====================================================
+# COEFFICIENT OF VARIATION
+# =====================================================
+
+cv_value <- round(
+  sd(size_data$count, na.rm = TRUE) /
+  mean(size_data$count, na.rm = TRUE), 2)
+
+# =====================================================
+# ZERO INFLATION
+# =====================================================
+
+zero_or <- round(
+  exp(coef(logit_zero_sample)["phaseDisturbance"]), 2)
+
+# =====================================================
+# STRUCTURAL BREAK
+# =====================================================
+
+break_chi <- round(as.numeric(chi_test$statistic), 2)
+break_df  <- chi_test$parameter
+break_p   <- signif(chi_test$p.value, 3)
+break_v   <- round(cramers_v, 2)
+
+break_p_text <- ifelse(break_p < 0.001,
+                       "&lt; 0.001",
+                       paste0("= ", break_p))
+
+# =====================================================
+# TEMPERATURE FILTERING (DISTURBANCE PHASE ONLY)
+# =====================================================
+
+coefs <- coef(nb_phase_temp)
+vc    <- vcov(nb_phase_temp)
+
+sizes <- levels(analysis_data$size_class)
+
+temp_vals <- sapply(sizes, function(s){
+
+  # Base temperature term (Baseline, Small)
+  beta <- coefs["water_temp_c"]
+  var  <- vc["water_temp_c","water_temp_c"]
+
+  # Add size interaction
+  size_term <- paste0("water_temp_c:size_class", s)
+  if(size_term %in% names(coefs)){
+    beta <- beta + coefs[size_term]
+    var  <- var +
+      vc[size_term,size_term] +
+      2*vc["water_temp_c",size_term]
+  }
+
+  # Add disturbance phase interaction
+  phase_term <- "water_temp_c:phaseRecovery"
+  if(phase_term %in% names(coefs)){
+    beta <- beta + coefs[phase_term]
+    var  <- var +
+      vc[phase_term,phase_term] +
+      2*vc["water_temp_c",phase_term]
+  }
+
+  # Add size × disturbance interaction
+  sp_term <- paste0("water_temp_c:size_class", s,
+                    ":phaseRecovery")
+
+  if(sp_term %in% names(coefs)){
+    beta <- beta + coefs[sp_term]
+    var  <- var +
+      vc[sp_term,sp_term] +
+      2*vc["water_temp_c",sp_term]
+  }
+
+  round((1 - exp(beta)) * 100)
+})
+# =====================================================
+# COLLAPSE
+# =====================================================
+
+irr_val  <- round(exp(nb_final$coefficients["year2024"]), 2)
+irr_2024 <- round((1-irr_val)*100, 1)
+
+# =====================================================
+# ZONE × YEAR INTERACTION
+# =====================================================
+
+lrt_row <- lrt_result[2,]
+lrt_chi <- round(lrt_row$`LR stat.`, 2)
+lrt_df  <- lrt_row$Df
+lrt_p   <- signif(lrt_row$`Pr(Chi)`, 3)
+
+lrt_p_text <- ifelse(lrt_p < 0.001,
+                     "&lt; 0.001",
+                     paste0("= ", lrt_p))
+
+# =====================================================
+# SIZE SHIFT + BIOMASS
+# =====================================================
+
+mean_size_2021 <- round(
+  size_data %>% filter(year=="2021") %>%
+  mutate(sz=case_when(
+    size_class=="Small (2mm)"~2,
+    size_class=="Medium (6mm)"~6,
+    TRUE~12)) %>%
+  summarise(m=sum(count*sz)/sum(count)) %>% pull(m),1)
+
+mean_size_2025 <- round(
+  size_data %>% filter(year=="2025") %>%
+  mutate(sz=case_when(
+    size_class=="Small (2mm)"~2,
+    size_class=="Medium (6mm)"~6,
+    TRUE~12)) %>%
+  summarise(m=sum(count*sz)/sum(count)) %>% pull(m),1)
+
+biomass_2024 <- biomass_zone %>%
+  filter(year=="2024") %>%
+  summarise(m=mean(mean_biomass)) %>% pull(m)
+
+biomass_2025 <- biomass_zone %>%
+  filter(year=="2025") %>%
+  summarise(m=mean(mean_biomass)) %>% pull(m)
+
+biomass_rebound <- round(biomass_2025/biomass_2024,2)
+
+# =====================================================
+# BUILD LABEL STRINGS FIRST (SAFE)
+# =====================================================
+
+disturb_label <- "
+<FONT POINT-SIZE='30'><B>Beach Nourishment 2019-2020</B></FONT><BR/>
+Pre-study disturbance
+"
+
+baseline_label <- "
+<FONT POINT-SIZE='30'><B>Baseline Structure 2021-2022</B></FONT><BR/>
+Sample-level baseline
+"
+
+zero_label <- paste0("
+<FONT POINT-SIZE='30'><B>Beach Nourishment 2023-2024</B></FONT><BR/>Sampled during active nourishment <BR/>representing sediment disturbance<BR/><BR/>
+<B>Zero Effect</B><BR/>
+", zero_or, "x higher zero crab count likelihood<BR/><BR/>
+")
+
+temp_label <- paste0("
+<FONT POINT-SIZE='30'><B>Temperature Filtering</B></FONT><BR/><BR/>
+Small: ", temp_vals[1], "% decrease per +1°C<BR/>
+Medium: ", temp_vals[2], "% decrease per +1°C<BR/>
+Large: ", temp_vals[3],"% decrease per +1°C
+")
+
+break_label <- paste0("
+<FONT POINT-SIZE='30'><B>Structural Break </B></FONT><BR/>Demographic shift toward<BR/>juvenile dominance<BR/><BR/>
+<B>Cramers V = ", break_v, "</B><BR/>
+&chi;2(2) = ", break_chi, "<BR/>
+p ", break_p_text, "
+")
+
+collapse_label <- paste0("
+<FONT POINT-SIZE='30'><B>Collapse</B></FONT><BR/>System wide collapse consistent<BR/>with disturbance-induced mortality<BR/><BR/>
+<B>", collapse_pct, "% biomass decline from baseline</B><BR/>
+Modeled IRR = ", irr_val, "
+")
+
+interaction_label <- paste0("
+<FONT POINT-SIZE='30'><B>Zone x Year Interaction</B></FONT><BR/>
+Temporal recovery trajectories differed<BR/>significantly between microhabitats<BR/><BR/>
+<B>Likelihood Ratio Test</B><BR/>
+&chi;2(3) = ", lrt_chi, "<BR/>
+p ", lrt_p_text, "
+")
+
+swash_label <- paste0("
+<FONT POINT-SIZE='30'><B>Swash Recovery </B></FONT><BR/>Rapid, spatially concentrated <BR/>demographic rebound<BR/><BR/>
+<B>", swash_recovery, "% biomass of baseline</B><BR/>
+")
+
+bore_label <- paste0("
+<FONT POINT-SIZE='30'><B>Bore Suppression </B></FONT><BR/>Persistent post-disturbance <BR/>demographic suppression<BR/><BR/>
+<B>", bore_recovery, "% biomass of baseline</B><BR/>
+")
+
+recruit_label <- paste0("
+<FONT POINT-SIZE='30'><B>Recruitment Pulse 2025</B></FONT><BR/>
+Juveniles dominate population structure<BR/><BR/>
+
+<B>Mean Body Size</B><BR/>
+", mean_size_2021, " &rarr; ", mean_size_2025, " mm
+")
+
+next_label <- "
+<FONT POINT-SIZE='30'><B>Next Nourishment 2026-2027</B></FONT>
+"
+# =====================================================
+# GRAPH
+# =====================================================
+
+dot_code <- paste0("
+digraph nourishment_full {
+
+graph [layout = dot, rankdir = TB]
+
+node [
+  shape = box,
+  style = \"rounded,filled\",
+  fontname = Helvetica,
+  fontsize = 26,
+  width = 7,
+  height = 3,
+  penwidth = 2
+]
+
+Disturb2019 [label=<",disturb_label,">, fillcolor=\"#FFB347\"]
+Baseline [label=<",baseline_label,">, fillcolor=\"gold\"]
+ZeroSpike [label=<",zero_label,">, fillcolor=\"#FFB347\"]
+TempFiltering [label=<",temp_label,">, fillcolor=\"#4DB6AC\"]
+Break2023 [label=<",break_label,">, fillcolor=\"mediumpurple1\"]
+Collapse2024 [label=<",collapse_label,">, fillcolor=\"lightcoral\"]
+Interaction [label=<",interaction_label,">, fillcolor=\"steelblue1\"]
+Swash2025 [label=<",swash_label,">, fillcolor=\"limegreen\"]
+Bore2025 [label=<",bore_label,">, fillcolor=\"paleturquoise2\"]
+Recruit2025 [label=<",recruit_label,">, fillcolor=\"turquoise\"]
+NextEvent [label=<",next_label,">, fillcolor=\"#FFB347\"]
+
+Disturb2019 -> Baseline
+Baseline -> ZeroSpike
+
+ZeroSpike -> Break2023
+ZeroSpike -> Collapse2024
+Break2023 -> TempFiltering
+Collapse2024 -> TempFiltering
+TempFiltering -> Interaction
+
+Interaction -> Swash2025
+Interaction -> Bore2025
+Swash2025 -> Recruit2025
+Bore2025  -> Recruit2025
+Recruit2025 -> NextEvent [style=dashed]
+
+}")
+
+grViz(dot_code)
+```
+
+```{r}
+# ============================================================
+# FINAL MODEL DIAGNOSTIC SUITE
+# (Run after all models are fit)
+# ============================================================
+
+cat("\n=============================\n")
+cat("MODEL DIAGNOSTIC CHECKS\n")
+cat("=============================\n\n")
+
+# ------------------------------------------------------------
+# 1. BINOMIAL OVERDISPERSION CHECK
+# ------------------------------------------------------------
+check_overdisp <- function(model, name){
+  ratio <- deviance(model) / df.residual(model)
+  cat("\n---", name, "---\n")
+  cat("Dispersion ratio:", round(ratio, 3), "\n")
+  if(ratio > 1.5){
+    cat("⚠ Potential overdispersion detected.\n")
+  } else {
+    cat("✓ No serious overdispersion.\n")
+  }
+}
+
+if(exists("global_model")) check_overdisp(global_model, "Global Demographic Model")
+if(exists("adult_model")) check_overdisp(adult_model, "Adult Structure Model")
+if(exists("juvenile_model")) check_overdisp(juvenile_model, "Juvenile Structure Model")
+if(exists("logit_zero_sample")) check_overdisp(logit_zero_sample, "Zero Inflation Model")
+
+
+# ------------------------------------------------------------
+# 2. NEGATIVE BINOMIAL DISPERSION ADEQUACY
+# ------------------------------------------------------------
+if(exists("nb_final")){
+  cat("\n--- Negative Binomial Dispersion ---\n")
+  cat("Theta:", round(nb_final$theta, 4), "\n")
+  if(nb_final$theta < 0.2){
+    cat("⚠ Very strong overdispersion (small theta).\n")
+  } else {
+    cat("✓ Dispersion parameter reasonable.\n")
+  }
+}
+# ------------------------------------------------------------
+# 3. SINGULARITY CHECK
+# ------------------------------------------------------------
+if(exists("nb_final")){
+  cat("\n--- Rank Deficiency Check ---\n")
+  mm <- model.matrix(nb_final)
+  qr_rank <- qr(mm)$rank
+  full_rank <- ncol(mm)
+  cat("Model rank:", qr_rank, "of", full_rank, "\n")
+  if(qr_rank < full_rank){
+    cat("⚠ Model matrix is rank deficient (missing combinations).\n")
+  } else {
+    cat("✓ No rank deficiency detected.\n")
+  }
+}
+
+# ------------------------------------------------------------
+# 4. DATE CLUSTERING TEST (Need Random Effects?)
+# ------------------------------------------------------------
+if(exists("analysis_data")){
+  
+  # Fit model with date as fixed effect proxy
+  nb_date_fixed <- glm.nb(
+    count ~ log_scoops +
+      water_temp_c * size_class +
+      location + year * zone +
+      factor(date),
+    data = analysis_data
+  )
+  
+  cat("\n--- Date Clustering Test ---\n")
+  print(anova(nb_final, nb_date_fixed, test="LRT"))
+  
+  p_date <- anova(nb_final, nb_date_fixed, test="LRT")$`Pr(Chi)`[2]
+  
+  if(!is.na(p_date) && p_date < 0.05){
+    cat("⚠ Significant date clustering detected.\n")
+    cat("→ Consider glmmTMB with random intercept for date.\n")
+  } else {
+    cat("✓ No strong evidence for date-level clustering.\n")
+  }
+}
+
+# ------------------------------------------------------------
+# 5. RESIDUAL DIAGNOSTICS
+# ------------------------------------------------------------
+if(exists("nb_final")){
+  
+  cat("\n--- Residual Diagnostics ---\n")
+  
+  pearson_resid <- residuals(nb_final, type="pearson")
+  fitted_vals <- fitted(nb_final)
+  
+  cat("Residual mean:", round(mean(pearson_resid),3), "\n")
+  cat("Residual SD:", round(sd(pearson_resid),3), "\n")
+  
+  if(abs(mean(pearson_resid)) < 0.1){
+    cat("✓ Residuals centered appropriately.\n")
+  } else {
+    cat("⚠ Residuals not centered at zero.\n")
+  }
+  
+  cor_rf <- cor(pearson_resid, fitted_vals)
+  cat("Residual vs fitted correlation:", round(cor_rf,3), "\n")
+  
+  if(abs(cor_rf) < 0.2){
+    cat("✓ No major pattern in residuals.\n")
+  } else {
+    cat("⚠ Possible model misspecification.\n")
+  }
+}
+
+# ------------------------------------------------------------
+# 6. MULTICOLLINEARITY (VIF)
+# ------------------------------------------------------------
+nb_additive <- glm.nb(
+  count ~ log_scoops +
+          water_temp_c +
+          size_class +
+          location +
+          zone +
+          year,
+  data = analysis_data
+)
+if(exists("nb_additive")){
+  cat("\n--- Variance Inflation Factors ---\n")
+  vif_vals <- try(car::vif(nb_additive), silent=TRUE)
+  if(!inherits(vif_vals, "try-error")){
+    print(vif_vals)}}
+
+cat("\n=============================\n")
+cat("END DIAGNOSTICS\n")
+cat("=============================\n")
+```
