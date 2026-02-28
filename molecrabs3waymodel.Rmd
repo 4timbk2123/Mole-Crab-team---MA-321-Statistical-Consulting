@@ -18,6 +18,7 @@ library(scales)
 library(maps)
 library(MASS)
 library(car)
+library(logistf)
 ```
 
 ```{r}
@@ -2033,10 +2034,10 @@ print(temp_effects)
 
 ```{r}
 # ==========================================
-# FORMAL TEST: Zero Inflation (Sample-Level)
+# ZERO PROBABILITY MODEL (Improved)
 # ==========================================
 
-sample_level <- clean_data %>%
+zero_data <- clean_data %>%
   filter(location != "sandy_hook") %>%
   filter(scoops > 0) %>%
   mutate(
@@ -2049,23 +2050,51 @@ sample_level <- clean_data %>%
     ),
     phase = factor(phase,
                    levels = c("Baseline","Disturbance","Recovery")),
-    zero_flag = ifelse(total_count == 0, 1, 0)
+    zone = factor(zone, levels = c("bore","swash")),
+    zero_flag = ifelse(total_count == 0, 1, 0),
+    log_scoops = log(scoops),
+    water_temp_c = water_temp - mean(water_temp, na.rm = TRUE)
   ) %>%
-  filter(!is.na(phase))
+  drop_na(phase, zone)
 
-logit_zero_sample <- glm(
-  zero_flag ~ phase + log(scoops),
+# -----------------------------
+# Model 1: Phase + Zone
+# -----------------------------
+zero_model_additive <- glm(
+  zero_flag ~ phase + zone + log_scoops + water_temp_c,
   family = binomial,
-  data = sample_level
+  data = zero_data
 )
 
-summary(logit_zero_sample)
+# -----------------------------
+# Model 2: Phase × Zone
+# -----------------------------
+zero_model_interaction <- glm(
+  zero_flag ~ phase * zone + log_scoops + water_temp_c,
+  family = binomial,
+  data = zero_data
+)
 
-cat("\nOdds ratios for zero probability (sample-level):\n")
-print(exp(cbind(
-  OR = coef(logit_zero_sample),
-  confint.default(logit_zero_sample)
-)))
+anova(zero_model_additive,
+      zero_model_interaction,
+      test = "LRT")
+exp(cbind(
+  OR = coef(zero_model_interaction),
+  confint.default(zero_model_interaction)
+))
+table(zero_data$phase, zero_data$zone, zero_data$zero_flag)
+
+zero_model_firth <- logistf(
+  zero_flag ~ phase * zone + log_scoops + water_temp_c,
+  data = zero_data
+)
+
+summary(zero_model_firth)
+
+exp(cbind(
+  OR = coef(zero_model_firth),
+  confint(zero_model_firth)
+))
 ```
 
 ```{r}
@@ -2095,9 +2124,6 @@ check_overdisp <- function(model, name){
 if(exists("global_model")) check_overdisp(global_model, "Global Demographic Model")
 if(exists("adult_model")) check_overdisp(adult_model, "Adult Structure Model")
 if(exists("juvenile_model")) check_overdisp(juvenile_model, "Juvenile Structure Model")
-if(exists("logit_zero_sample")) check_overdisp(logit_zero_sample, "Zero Inflation Model")
-
-
 # ------------------------------------------------------------
 # 2. NEGATIVE BINOMIAL DISPERSION ADEQUACY
 # ------------------------------------------------------------
@@ -2207,8 +2233,6 @@ cat("=============================\n")
 
 ```{r disturbance_clock, eval=knitr::is_html_output()}
 library(DiagrammeR)
-library(dplyr)
-library(vegan)
 # ==========================================
 # MEAN BODY SIZE (Baseline vs Recovery)
 # ==========================================
@@ -2240,34 +2264,17 @@ mean_size_2025 <- round(
 
 cat("Baseline mean size:", mean_size_baseline, "mm\n")
 cat("Recovery mean size:", mean_size_2025, "mm\n")
-
-# =====================================================
-# SHANNON INDEX
-# =====================================================
-
-shannon_data <- clean_data %>%
-  mutate(total = ct_2mm + ct_6mm + ct_12mm) %>%
-  filter(total > 0)
-
-mean_shannon <- round(
-  mean(diversity(shannon_data[,c("ct_2mm","ct_6mm","ct_12mm")],
-  index="shannon"), na.rm = TRUE), 2)
-
-# =====================================================
-# COEFFICIENT OF VARIATION
-# =====================================================
-
-cv_value <- round(
-  sd(size_data$count, na.rm = TRUE) /
-  mean(size_data$count, na.rm = TRUE), 2)
-
 # =====================================================
 # ZERO INFLATION
 # =====================================================
 
 zero_or <- round(
-  exp(coef(logit_zero_sample)["phaseDisturbance"]), 2)
+  exp(coef(zero_model_firth)["phaseDisturbance"]), 2
+)
 
+cat("Disturbance Odds Ratio (Zero Probability):",
+    zero_or, "\n")
+exp(coef(zero_model_firth)["phaseDisturbance:zoneswash"])
 # =====================================================
 # STRUCTURAL BREAK
 # =====================================================
@@ -2369,8 +2376,14 @@ cat("Recovery biomass:", biomass_recovery, "\n")
 cat("Collapse:", collapse_pct, "%\n")
 cat("Recovery:", recovery_pct, "% of baseline\n")
 
+size_decline <- round(
+  100 * (1 - mean_size_2025 / mean_size_baseline), 1
+)
+
+cat("Mean body size declined by",
+    size_decline, "% from baseline.\n")
 # ----------------------------------
-# Extract zone-specific temperature effects
+# Split temperature effects by zone
 # ----------------------------------
 
 swash_effects <- temp_effects %>%
@@ -2378,14 +2391,35 @@ swash_effects <- temp_effects %>%
 
 bore_effects <- temp_effects %>%
   filter(Zone == "bore")
+format_zone_temp <- function(df){
 
-swash_min <- abs(round(min(swash_effects$Percent_Change), 0))
-swash_max <- abs(round(max(swash_effects$Percent_Change), 0))
+  small  <- df %>% filter(Size_Class == "Small (2mm)") %>% pull(Percent_Change)
+  medium <- df %>% filter(Size_Class == "Medium (6mm)") %>% pull(Percent_Change)
+  large  <- df %>% filter(Size_Class == "Large (12mm+)") %>% pull(Percent_Change)
 
-bore_min  <- abs(round(min(bore_effects$Percent_Change), 0))
-bore_max  <- abs(round(max(bore_effects$Percent_Change), 0))
+  paste0(
+    "Small: ", ifelse(small  > 0, "−", "+"), abs(round(small,0)), "%<BR/>",
+    "Medium: ", ifelse(medium > 0, "−", "+"), abs(round(medium,0)), "%<BR/>",
+    "Large: ", ifelse(large  > 0, "−", "+"), abs(round(large,0)), "%"
+  )
+}
 
-# =====================================================
+swash_temp_text <- format_zone_temp(swash_effects)
+bore_temp_text  <- format_zone_temp(bore_effects)
+# ==========================================
+# EXTRACT MODELED IRR (2025 vs Baseline)
+# ==========================================
+
+irr_2025_swash <- zone_year_irr %>%
+  filter(Zone == "Swash", Year == "2025") %>%
+  pull(IRR) %>%
+  round(2)
+
+irr_2025_bore <- zone_year_irr %>%
+  filter(Zone == "Bore", Year == "2025") %>%
+  pull(IRR) %>%
+  round(2)
+#=====================================================
 # BUILD LABEL STRINGS FIRST (SAFE)
 # =====================================================
 disturb_label <- paste0(
@@ -2410,7 +2444,7 @@ zero_or, "× higher zero crab count likelihood"
 
 break_label <- paste0(
 "<FONT POINT-SIZE='30'><B>Structural Break</B></FONT><BR/>",
-"Demographic shift toward juvenile dominance<BR/><BR/>",
+"Demographic shift toward<BR/>juvenile dominance<BR/><BR/>",
 "<B>Cramers V = ", break_v, "</B><BR/>",
 "&chi;2(2) = ", break_chi, "<BR/>",
 "p ", break_p_text
@@ -2424,31 +2458,49 @@ collapse_label <- paste0(
 )
 
 combined_label <- paste0(
-"<FONT POINT-SIZE='30'><B>Zone-Dependent Filtering</B></FONT><BR/>",
-"Thermal filtering of size classes<BR/>differs by microhabitat<BR/><BR/>",
+"<TABLE BORDER='0' CELLBORDER='0' CELLPADDING='10'>",
 
-"<B>Thermal Effect per +1°C</B><BR/>",
-"Swash: −", swash_min, "–", swash_max, "% abundance<BR/>",
-"Bore: −", bore_min, "–", bore_max, "% abundance<BR/><BR/>"
+"<TR>",
+"<TD COLSPAN='2'>",
+"<FONT POINT-SIZE='30'><B>Zone-Dependent Filtering</B></FONT><BR/>",
+"Model-adjusted thermal size class filtering<BR/>differs by microhabitat",
+"</TD>",
+"</TR>",
+
+"<TR>",
+"<TD ALIGN='LEFT'>",
+"<B>Swash (per +1°C)</B><BR/>",
+swash_temp_text,
+"</TD>",
+
+"<TD ALIGN='LEFT'>",
+"<B>Bore (per +1°C)</B><BR/>",
+bore_temp_text,
+"</TD>",
+"</TR>",
+
+"</TABLE>"
 )
 
 swash_label <- paste0(
 "<FONT POINT-SIZE='30'><B>Swash Recovery</B></FONT><BR/>",
 "Rapid, spatially concentrated rebound<BR/><BR/>",
-"<B>", swash_recovery, "% biomass of baseline</B>"
+"<B>", swash_recovery, "% biomass of baseline</B><BR/>",
+"Modeled IRR 2025 = ", irr_2025_swash
 )
 
 bore_label <- paste0(
 "<FONT POINT-SIZE='30'><B>Bore Suppression</B></FONT><BR/>",
 "Persistent post-disturbance suppression<BR/><BR/>",
-"<B>", bore_recovery, "% biomass of baseline</B>"
+"<B>", bore_recovery, "% biomass of baseline</B><BR/>",
+"Modeled IRR 2025 = ", irr_2025_bore
 )
-
 recruit_label <- paste0(
-"<FONT POINT-SIZE='30'><B>Recruitment Pulse 2025</B></FONT><BR/>",
-"Juveniles dominate population structure<BR/><BR/>",
-"<B>Mean Body Size</B><BR/>",
-mean_size_baseline, " → ", mean_size_2025, " mm"
+  "<FONT POINT-SIZE='30'><B>Recruitment Pulse 2025</B></FONT><BR/>",
+  "Juveniles dominate population structure<BR/><BR/>",
+  "<B>Mean Body Size</B><BR/>",
+  mean_size_baseline, " → ", mean_size_2025, " mm<BR/>",
+  size_decline, "% reduction in mean size"
 )
 
 next_label <- "<FONT POINT-SIZE='30'><B>Next Nourishment 2026-2027</B></FONT>"
@@ -2498,6 +2550,5 @@ Bore2025  -> Recruit2025
 Recruit2025 -> NextEvent [style=dashed]
 
 }")
-
 grViz(dot_code)
 ```
